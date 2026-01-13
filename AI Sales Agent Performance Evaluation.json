@@ -1,0 +1,252 @@
+{
+  "name": "AI Sales Agent Performance Evaluation",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "faad7034-486c-4fec-8a18-efba6c818023",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        208,
+        -96
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [\n  {\n    json: { agent: \"Ali Khan\", transcript: \"Hello, I'm Ali. Need internet? Our 50MB plan is $50. No? Okay.\", outcome: \"Lost\" }\n  },\n  {\n    json: { agent: \"Ali Khan\", transcript: \"Hi, Ali here. Let's get you signed up for our best data plan.\", outcome: \"Closed\" }\n  },\n  {\n    json: { agent: \"Sara Ahmed\", transcript: \"Good morning, this is Sara. I noticed you were looking for better speed...\", outcome: \"Closed\" }\n  },\n  {\n    json: { agent: \"Sara Ahmed\", transcript: \"I understand the price is high, but the reliability saves you money...\", outcome: \"Closed\" }\n  },\n  {\n    json: { agent: \"Sara Ahmed\", transcript: \"Welcome! Let's start by identifying your household data needs...\", outcome: \"Follow-up\" }\n  }\n];\n"
+      },
+      "id": "c1218080-6ab6-4717-8abb-1b4ed8865bbb",
+      "name": "Load Sample Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        416,
+        -96
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {
+          "reset": false
+        }
+      },
+      "id": "fcd3f0a9-6371-41d8-99ae-b810b0f83559",
+      "name": "Split Calls",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 1,
+      "position": [
+        608,
+        -96
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 1️⃣ Extract original data from the loop (Split Calls node)\nconst originalData = $node[\"Split Calls\"].json;\nconst agentName = originalData.agent;\nconst outcome = originalData.outcome;\n\n// 2️⃣ Parse the AI response from the HTTP Request node\nconst aiResponse = $node[\"HTTP Request\"].json.choices[0].message.content;\nlet scores;\n\ntry {\n    const parsed = JSON.parse(aiResponse);\n    // Handle cases where the AI might wrap scores in a 'scores' key or return them flat\n    scores = parsed.scores || parsed;\n} catch (e) {\n    // Fallback if JSON is malformed\n    scores = { Greeting: 0, Discovery: 0, Pitch: 0, \"Objection Handling\": 0, Closing: 0 };\n}\n\n// 3️⃣ Sum total call quality (Max 50)\nconst callQuality = (scores.Greeting || 0) + \n                    (scores.Discovery || 0) + \n                    (scores.Pitch || 0) + \n                    (scores[\"Objection Handling\"] || scores.Objection || 0) + \n                    (scores.Closing || 0);\n\n// 4️⃣ Determine conversion (Closed = 100, others = 0)\nconst isClosed = outcome === \"Closed\" ? 100 : 0;\n\nreturn {\n    agent: agentName,\n    callQuality: callQuality,\n    isClosed: isClosed,\n    outcome: outcome\n};"
+      },
+      "id": "5f9dcdd1-8da2-45c6-a1f7-163018f68eab",
+      "name": "Calculate Call Quality",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1104,
+        -112
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst summary = {};\n\n// Group calls by Agent Name\nitems.forEach(item => {\n    const data = item.json;\n    const name = data.agent || \"Unknown\";\n\n    if (!summary[name]) {\n        summary[name] = { calls: 0, totalQuality: 0, closedCount: 0 };\n    }\n\n    summary[name].calls += 1;\n    summary[name].totalQuality += data.callQuality || 0;\n    if (data.isClosed === 100) summary[name].closedCount += 1;\n});\n\n// Calculate final averages and weighted scores\nreturn Object.keys(summary).map(agentName => {\n    const stats = summary[agentName];\n    const avgQuality = stats.totalQuality / stats.calls;\n    const conversionRate = (stats.closedCount / stats.calls) * 100;\n\n    // Formula: (Quality normalized to 100 * 0.6) + (Conversion % * 0.4)\n    const normalizedQuality = (avgQuality / 50) * 100;\n    const finalScore = (normalizedQuality * 0.6) + (conversionRate * 0.4);\n\n    let verdict = \"Needs Improvement\";\n    if (finalScore >= 80) verdict = \"Top Performer\";\n    else if (finalScore >= 50) verdict = \"Average Performer\";\n\n    return {\n        json: {\n            agentName,\n            avgCallQuality: avgQuality.toFixed(1) + \"/50\",\n            conversionRate: conversionRate.toFixed(1) + \"%\",\n            finalPerformanceScore: finalScore.toFixed(2),\n            verdict\n        }\n    };\n});"
+      },
+      "id": "2e03caff-862b-49b5-b100-14fb0715ca35",
+      "name": "Aggregate Agent Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1360,
+        -112
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.groq.com/openai/v1/chat/completions\n",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"Score the sales call (0-10) for: Greeting, Discovery, Pitch, Objection Handling, Closing. Total max score is 50. Return ONLY JSON.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Agent: {{ $json.agent }}, Transcript: {{ $json.transcript }}\"\n    }\n  ],\n  \"response_format\": { \"type\": \"json_object\" },\n  \"temperature\": 0\n}\n",
+        "options": {
+          "response": {
+            "response": {}
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        816,
+        -96
+      ],
+      "id": "124d1a4a-e721-4541-a8ed-ea7b25f95dc4",
+      "name": "HTTP Request",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "TkchrBSMd747G4XZ",
+          "name": "Header Auth account"
+        },
+        "httpBearerAuth": {
+          "id": "DP7IZEfPvZXAecOT",
+          "name": "Bearer Auth account"
+        },
+        "httpBasicAuth": {
+          "id": "CkWy750Sd0HD57gv",
+          "name": "Unnamed credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nreturn items.map(item => {\n  const data = item.json;\n  \n  // Use '=' for variable assignment\n  const agentName = data.agentName;\n  const avgQuality = data.avgCallQuality;\n  const conversionRate = data.conversionRate;\n  const finalScore = data.finalPerformanceScore;\n  const verdict = data.verdict;\n\n  // Format the HTML for your dashboard\n  let color = verdict === \"Top Performer\" ? \"green\" : (verdict === \"Average Performer\" ? \"orange\" : \"red\");\n\n  const html = `\n    <div style=\"font-family: Arial; border: 1px solid #ccc; padding: 15px; border-radius: 8px;\">\n      <h2 style=\"color: ${color};\">${agentName} - ${verdict}</h2>\n      <p><b>Performance Score:</b> ${finalScore} / 100</p>\n      <p><b>Metrics:</b> Quality ${avgQuality} | Conversion ${conversionRate}</p>\n    </div>\n  `;\n\n  return {\n    json: {\n      agent: agentName,\n      avgQuality: avgQuality,\n      conversionRate: conversionRate,\n      finalPerformanceScore: finalScore,\n      verdict: verdict,\n      dashboardHTML: html\n    }\n  };\n});"
+      },
+      "id": "9a33d49e-70e3-404a-978a-be0ea10059a8",
+      "name": "Final Score",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1648,
+        -112
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.groq.com/openai/v1/chat/completions\n",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a sales coach. Write a 2-sentence review.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Agent: {{ $json.agent }}, Quality: {{ $json.avgQuality }}, Conversion: {{ $json.conversionRate }}.\"\n    }\n  ]\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1888,
+        -112
+      ],
+      "id": "ff242b7c-6068-4fd5-a295-e2f58502ae8f",
+      "name": "HTTP Request1",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "TkchrBSMd747G4XZ",
+          "name": "Header Auth account"
+        },
+        "httpBearerAuth": {
+          "id": "DP7IZEfPvZXAecOT",
+          "name": "Bearer Auth account"
+        },
+        "httpBasicAuth": {
+          "id": "CkWy750Sd0HD57gv",
+          "name": "Unnamed credential"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Load Sample Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Sample Data": {
+      "main": [
+        [
+          {
+            "node": "Split Calls",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Calls": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Call Quality": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Agent Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Agent Data": {
+      "main": [
+        [
+          {
+            "node": "Final Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Calculate Call Quality",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Final Score": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request1": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "0897a6da-fa63-4679-a41b-cdec21af0056",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "0f1559eaa2403ae0402e5d29db5d6876f8f7c41001326479197fe40159c5a11c"
+  },
+  "id": "VvnpEaLoka39IxH9",
+  "tags": []
+}
